@@ -39,6 +39,7 @@ import { vfmtPosColor, getAttributeStride, getComponentPerVertex } from '../rend
 import { NativeUIModelProxy } from '../renderer/native-2d';
 import { RenderEntity, RenderEntityType } from '../renderer/render-entity';
 import type { GraphicsAssembler } from '../assembler/graphics/webgl/graphics-assembler';
+import { nextPow2 } from '../../core/math/bits';
 
 const attributes = vfmtPosColor.concat([
     new Attribute('a_dist', Format.R32F),
@@ -47,6 +48,17 @@ const attributes = vfmtPosColor.concat([
 const componentPerVertex = getComponentPerVertex(attributes);
 
 const stride = getAttributeStride(attributes);
+
+const MIN_VERTEX_CAPACITY = 64;
+const MAX_VERTEX_CAPACITY = 65535;
+const MIN_INDEX_CAPACITY = 128;
+const MAX_INDEX_CAPACITY = 65535 * 2;
+
+// Buffers grow to the next power of two that fits the drawn geometry instead of
+// reserving 65535 vertices (about 2.25 MB) for every Graphics up front.
+function graphicsBufferCapacity (count: number, minimum: number, maximum: number): number {
+    return Math.min(maximum, nextPow2(Math.max(count, minimum)));
+}
 
 /**
  * @en
@@ -634,16 +646,19 @@ export class Graphics extends UIRenderer {
 
         if (this.model.subModels.length <= idx) {
             const gfxDevice: Device = deviceManager.gfxDevice;
+            const renderData = this.impl ? this.impl.getRenderDataList()[idx] : null;
+            const vertexCapacity = graphicsBufferCapacity(renderData ? renderData.vertexStart : 0, MIN_VERTEX_CAPACITY, MAX_VERTEX_CAPACITY);
+            const indexCapacity = graphicsBufferCapacity(renderData ? renderData.indexStart : 0, MIN_INDEX_CAPACITY, MAX_INDEX_CAPACITY);
             const vertexBuffer = gfxDevice.createBuffer(new BufferInfo(
                 BufferUsageBit.VERTEX | BufferUsageBit.TRANSFER_DST,
                 MemoryUsageBit.DEVICE,
-                65535 * stride,
+                vertexCapacity * stride,
                 stride,
             ));
             const indexBuffer = gfxDevice.createBuffer(new BufferInfo(
                 BufferUsageBit.INDEX | BufferUsageBit.TRANSFER_DST,
                 MemoryUsageBit.DEVICE,
-                65535 * Uint16Array.BYTES_PER_ELEMENT * 2,
+                indexCapacity * Uint16Array.BYTES_PER_ELEMENT,
                 Uint16Array.BYTES_PER_ELEMENT,
             ));
 
@@ -674,11 +689,19 @@ export class Graphics extends UIRenderer {
                 continue;
             }
 
+            const vertexBuffer = ia.vertexBuffers[0];
             const vb = new Float32Array(renderData.vData.buffer, 0, renderData.vertexStart * componentPerVertex);
-            ia.vertexBuffers[0].update(vb);
+            if (vb.byteLength > vertexBuffer.size) {
+                vertexBuffer.resize(graphicsBufferCapacity(renderData.vertexStart, MIN_VERTEX_CAPACITY, MAX_VERTEX_CAPACITY) * stride);
+            }
+            vertexBuffer.update(vb);
             ia.vertexCount = renderData.vertexStart;
+            const indexBuffer = ia.indexBuffer!;
             const ib = new Uint16Array(renderData.iData.buffer, 0, renderData.indexStart);
-            ia.indexBuffer!.update(ib);
+            if (ib.byteLength > indexBuffer.size) {
+                indexBuffer.resize(graphicsBufferCapacity(renderData.indexStart, MIN_INDEX_CAPACITY, MAX_INDEX_CAPACITY) * Uint16Array.BYTES_PER_ELEMENT);
+            }
+            indexBuffer.update(ib);
             ia.indexCount = renderData.indexStart;
             renderData.lastFilledVertex = renderData.vertexStart;
             renderData.lastFilledIndex = renderData.indexStart;

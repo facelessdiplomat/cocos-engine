@@ -23,10 +23,25 @@
 ****************************************************************************/
 
 #include "UIModelProxy.h"
+#include <algorithm>
 #include "2d/renderer/RenderEntity.h"
+#include "base/Utils.h"
 #include "core/assets/RenderingSubMesh.h"
 
 namespace cc {
+namespace {
+constexpr uint32_t MIN_VERTEX_CAPACITY = 64;
+constexpr uint32_t MAX_VERTEX_CAPACITY = 65535;
+constexpr uint32_t MIN_INDEX_CAPACITY = 128;
+constexpr uint32_t MAX_INDEX_CAPACITY = 65535 * 2;
+
+// Buffers grow to the next power of two that fits the drawn geometry: no 2.25 MB
+// reservation per Graphics up front and no new GPU buffer on every size change.
+uint32_t graphicsBufferCapacity(uint32_t count, uint32_t minimum, uint32_t maximum) {
+    return std::min(maximum, utils::nextPOT(std::max(count, minimum)));
+}
+} // namespace
+
 UIModelProxy::UIModelProxy() {
     _device = Root::getInstance()->getDevice();
 }
@@ -55,16 +70,18 @@ void UIModelProxy::activeSubModels() {
                     return;
                 }
 
+                const uint32_t vertexCapacity = graphicsBufferCapacity(drawInfo->getVertexOffset(), MIN_VERTEX_CAPACITY, MAX_VERTEX_CAPACITY);
+                const uint32_t indexCapacity = graphicsBufferCapacity(drawInfo->getIndexOffset(), MIN_INDEX_CAPACITY, MAX_INDEX_CAPACITY);
                 auto* vertexBuffer = _device->createBuffer({
                     gfx::BufferUsageBit::VERTEX | gfx::BufferUsageBit::TRANSFER_DST,
                     gfx::MemoryUsageBit::DEVICE,
-                    65535 * _stride,
+                    vertexCapacity * _stride,
                     _stride,
                 });
                 auto* indexBuffer = _device->createBuffer({
                     gfx::BufferUsageBit::INDEX | gfx::BufferUsageBit::TRANSFER_DST,
                     gfx::MemoryUsageBit::DEVICE,
-                    65535 * sizeof(uint16_t) * 2,
+                    static_cast<uint32_t>(indexCapacity * sizeof(uint16_t)),
                     sizeof(uint16_t),
                 });
                 gfx::BufferList vbReference;
@@ -90,21 +107,21 @@ void UIModelProxy::uploadData() {
         if (drawInfo->getVertexOffset() <= 0 || drawInfo->getIndexOffset() <= 0) continue;
         gfx::BufferList vBuffers = ia->getVertexBuffers();
         if (!vBuffers.empty()) {
-            auto size = drawInfo->getVertexOffset() * _stride;
-            // if (size > vBuffers[0]->getSize()) {
-            vBuffers[0]->resize(size);
-            // }
-            vBuffers[0]->update(drawInfo->getVDataBuffer()); // vdata
+            const uint32_t vertexBytes = drawInfo->getVertexOffset() * _stride;
+            if (vertexBytes > vBuffers[0]->getSize()) {
+                vBuffers[0]->resize(graphicsBufferCapacity(drawInfo->getVertexOffset(), MIN_VERTEX_CAPACITY, MAX_VERTEX_CAPACITY) * _stride);
+            }
+            vBuffers[0]->update(drawInfo->getVDataBuffer(), vertexBytes); // vdata
         }
         ia->setVertexCount(drawInfo->getVertexOffset()); // count
 
         gfx::Buffer* iBuffer = ia->getIndexBuffer();
-        auto size = drawInfo->getIndexOffset() * 2;
-        // if (size > iBuffer->getSize()) {
-        iBuffer->resize(size);
-        // }
-        iBuffer->update(drawInfo->getIDataBuffer());   // idata
-        ia->setIndexCount(drawInfo->getIndexOffset()); // indexCount
+        const auto indexBytes = static_cast<uint32_t>(drawInfo->getIndexOffset() * sizeof(uint16_t));
+        if (indexBytes > iBuffer->getSize()) {
+            iBuffer->resize(static_cast<uint32_t>(graphicsBufferCapacity(drawInfo->getIndexOffset(), MIN_INDEX_CAPACITY, MAX_INDEX_CAPACITY) * sizeof(uint16_t)));
+        }
+        iBuffer->update(drawInfo->getIDataBuffer(), indexBytes); // idata
+        ia->setIndexCount(drawInfo->getIndexOffset());           // indexCount
         // drawInfo->setModel(_model); // hack, render by model
     }
 
